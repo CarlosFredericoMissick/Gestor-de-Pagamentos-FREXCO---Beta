@@ -70,6 +70,7 @@ async function importarRecebivelExcel(file) {
 
 let _concilSort = { field: null, dir: 1 }; // dir: 1=asc, -1=desc
 let _concilRows = []; // cache das linhas calculadas para re-sort sem recalcular
+let _concilCalculo = null; // { ctx, preparo } da última conciliação (modal Dividir recebível)
 
 function sortConcil(field) {
     if (_concilRows.length === 0) return;
@@ -143,6 +144,55 @@ function toggleConciliacaoModal() {
 // exportações usam o mesmo resultado guardado em _concilRows[i].resultado.
 // ========================================
 
+// Rótulo de um motorista do resultado (ex.: "Jorge Rotas" quando há o líder Jorge na nota)
+function rotuloMotoristaDoResultado(resultado, vehicleId) {
+    const p = findPrestadorByVehicleId(vehicleId);
+    const m = resultado.motoristas.find(x => idMotorista(x.vehicleId) === idMotorista(vehicleId))
+        || { vehicleId, nome: p?.nome || String(vehicleId) };
+    return rotuloMotorista(m, prestadoresList, nomesDeLideres(resultado.motoristas, prestadoresList));
+}
+
+// Botão (só ícone, fora do export) para dividir o recebível de motorista que está em 2+ notas
+function botaoDividirRecebivel(resultado, rowIdx) {
+    if (resultado.compartilhados.length === 0) return '';
+    return `<button type="button" data-export-ignorar onclick="event.stopPropagation(); abrirDivisaoRecebivel(${rowIdx})"
+        class="ml-1.5 inline-flex align-middle p-0.5 rounded text-gray-500 hover:text-frexco hover:bg-frexco/10 no-underline"
+        title="Dividir recebível" aria-label="Dividir recebível"><i data-lucide="split" class="w-3.5 h-3.5"></i></button>`;
+}
+
+// Avisos da divisão na célula de motoristas (fora do export)
+function avisosDivisao(resultado) {
+    const avisos = [];
+    resultado.divisao.forEach(d => {
+        const nome = rotuloMotoristaDoResultado(resultado, d.vehicleId);
+        if (d.status === 'restanteMultiplo' && d.alocadoCentavos === null) {
+            avisos.push(`<span class="text-amber-700">${nome}: aloque as demais notas deste motorista (o total entra em cada uma)</span>`);
+        } else if (d.status === 'excede' || d.status === 'semRestante' || d.status === 'negativo') {
+            avisos.push(`<span class="text-red-600">${nome}: divisão inválida (refaça), o total entra em cada nota</span>`);
+        } else if (d.status === 'ok' || d.status === 'restanteMultiplo') {
+            avisos.push(`<span class="text-gray-500">${nome}: recebível dividido (${d.recebeRestante ? 'restante' : 'alocado'})</span>`);
+        }
+    });
+    resultado.alocacaoOutroPeriodo
+        .filter(id => !resultado.divisao.some(d => d.vehicleId === id && d.alocadoCentavos !== null))
+        .forEach(id => avisos.push(`<span class="text-gray-400" title="A alocação foi feita para outro período de conciliação e não vale para este.">${rotuloMotoristaDoResultado(resultado, id)}: alocação de outro período ignorada</span>`));
+    return avisos.map(a => `<span data-export-ignorar class="block whitespace-normal text-[10px] leading-tight mt-0.5">${a}</span>`).join('');
+}
+
+// Texto do detalhe: quanto do recebível de cada motorista dividido ficou nesta nota
+function descreverDivisaoNaNota(resultado) {
+    return resultado.divisao.map(d => {
+        const nome = rotuloMotoristaDoResultado(resultado, d.vehicleId);
+        const valor = formatarMoeda(d.valorCentavos / 100);
+        const total = formatarMoeda(d.totalCentavos / 100);
+        if (d.status === 'ok' || (d.status === 'restanteMultiplo' && d.alocadoCentavos !== null)) {
+            return `Recebível de ${nome} dividido entre ${d.qtdNotas} notas: ${valor} de ${total} nesta nota (${d.recebeRestante ? 'restante' : 'valor alocado'}).`;
+        }
+        if (d.status === 'restanteMultiplo') return `${nome}: aloque as demais notas deste motorista. Até lá o total (${total}) entra nesta nota.`;
+        return `${nome}: divisão inválida (refaça em "Dividir recebível"). O total (${total}) entra nesta nota.`;
+    });
+}
+
 function executarConciliacao() {
     const inicio = document.getElementById('concilDataInicio').value;
     const fim    = document.getElementById('concilDataFim').value;
@@ -159,9 +209,11 @@ function executarConciliacao() {
 
     // Calculado sobre todas as notas (independe do filtro de time) para a comissão de
     // cada time ir para a nota mais recente do líder, mesmo fora do filtro.
-    const resultados = calcularConciliacaoNotas(extractedResults, {
-        prestadores: prestadoresList, recebivel: recebivelData, dataInicio, dataFim
-    });
+    const ctx = { prestadores: prestadoresList, recebivel: recebivelData, dataInicio, dataFim };
+    // Divisão do recebível de motoristas em 2+ notas (todas as notas, independe do filtro)
+    const preparo = prepararDivisoes(extractedResults, ctx);
+    const resultados = calcularConciliacaoNotas(extractedResults, ctx, politicaComissaoPadrao(), preparo);
+    _concilCalculo = { ctx, preparo };
 
     // Filtro de times via checkbox
     const notasFiltradas = _concilTimesAtivos.size > 0
@@ -198,7 +250,7 @@ function executarConciliacao() {
             }
         }
 
-        const nomesMotoristas = motoristas.map(m => m.nome).join(', ') || '-';
+        const nomesMotoristas = rotulosMotoristas(motoristas, prestadoresList).join(', ') || '-';
         const diffColor = diff === null ? ''
             : Math.abs(diff) > tolerancia
                 ? (diff > 0 ? 'text-red-600 font-semibold' : 'text-orange-600 font-semibold')
@@ -215,15 +267,15 @@ function executarConciliacao() {
             : 'text-blue-700 underline cursor-pointer hover:text-blue-900';
         const valorDevidoCell = temDados
             ? `<td class="px-3 py-2 text-right font-mono ${corLink}" onclick="abrirConcilDetalheNota(${rowIdx})">
-                  ${fmtMoney(valorDevido)}</td>`
-            : `<td class="px-3 py-2 text-right text-gray-400">-</td>`;
+                  ${fmtMoney(valorDevido)}${botaoDividirRecebivel(resultado, rowIdx)}</td>`
+            : `<td class="px-3 py-2 text-right text-gray-400">-${botaoDividirRecebivel(resultado, rowIdx)}</td>`;
 
         const tr = document.createElement('tr');
         tr.className = `hover:bg-gray-50 transition-colors${isLider ? ' bg-purple-50/30' : ''}`;
         tr.innerHTML = `
             <td class="px-3 py-2 truncate max-w-[130px]" title="${nota.arquivo}">${nota.arquivo}</td>
             <td class="px-3 py-2 text-gray-700 truncate max-w-[120px]">${liderBadge}${respNome}</td>
-            <td class="px-3 py-2 text-gray-600 truncate max-w-[160px]" title="${nomesMotoristas}">${nomesMotoristas}</td>
+            <td class="px-3 py-2 text-gray-600 truncate max-w-[160px]" title="${nomesMotoristas}">${nomesMotoristas}${avisosDivisao(resultado)}</td>
             <td class="px-3 py-2 text-center text-gray-500 text-[11px]">${dataEmissaoDisplay}</td>
             <td class="px-3 py-2 text-right font-mono">${fmtMoney(valorNota)}</td>
             ${valorDevidoCell}
@@ -245,6 +297,7 @@ function executarConciliacao() {
     document.getElementById('concilSemDados').textContent = semDados;
     document.getElementById('concilPlaceholder').classList.add('hidden');
     document.getElementById('concilTabela').classList.remove('hidden');
+    lucide.createIcons();
 }
 
 // Conciliação time filter
@@ -365,8 +418,14 @@ function abrirConcilDetalheNota(rowIdx) {
     const fmtMoney = formatarMoeda;
     const fmtDate  = d => (d instanceof Date ? d : new Date(d)).toLocaleDateString('pt-BR');
     const linhas = resultado.linhasMotoristas;
+    const motoristasRotulo = rotulosMotoristas(resultado.motoristas, prestadoresList).join(', ') || '-';
 
     document.getElementById('concilDetalheNome').textContent = _concilDetalheAtual.nome;
+    document.getElementById('concilDetalheMotoristas').textContent = `Motoristas na nota: ${motoristasRotulo}`;
+    const divisaoEl = document.getElementById('concilDetalheDivisao');
+    const textosDivisao = descreverDivisaoNaNota(resultado);
+    divisaoEl.innerHTML = textosDivisao.map(t => `<div>${t}</div>`).join('');
+    divisaoEl.classList.toggle('hidden', textosDivisao.length === 0);
     if (resultado.isLider) {
         const times = resultado.lideres.map(l => l.timeVinculado).join(', ');
         document.getElementById('concilDetalheLiderBadge').classList.remove('hidden');
@@ -411,7 +470,9 @@ function abrirConcilDetalheNota(rowIdx) {
             <td class="px-3 py-2 text-right font-mono text-gray-500">${fmtMoney(r.adicional)}</td>
             <td class="px-3 py-2 text-right font-mono text-yellow-700">${fmtMoney(r.descarga||0)}</td>
             <td class="px-3 py-2 text-right font-mono text-gray-500">${fmtMoney(r.suporte)}</td>
-            <td class="px-3 py-2 text-right font-bold font-mono text-gray-800">${fmtMoney(r.totalMotorista)}</td>`;
+            <td class="px-3 py-2 text-right font-bold font-mono text-gray-800">${fmtMoney(r.totalMotorista)}${r.parcial
+                ? `<span class="block text-[10px] font-normal text-amber-700" title="Rota fracionada pela divisão do recebível">parcial · parte de ${fmtMoney(r.totalOriginal)}</span>`
+                : ''}</td>`;
         tbody.appendChild(tr);
     });
 

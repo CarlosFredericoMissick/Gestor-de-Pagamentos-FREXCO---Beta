@@ -45,9 +45,10 @@ function renderMotoristasSelecionados() {
         container.innerHTML = '<span class="text-xs text-gray-400 italic">Nenhum selecionado</span>';
         return;
     }
+    const rotulos = rotulosMotoristas(_motoristasModalSelecionados, prestadoresList);
     container.innerHTML = _motoristasModalSelecionados.map((m, i) => `
         <span class="inline-flex items-center gap-1 bg-frexco/10 text-frexco-dark border border-frexco/30 rounded-full px-2 py-0.5 text-xs font-medium">
-            ${m.nome}
+            ${rotulos[i]}
             <button onclick="removerMotoristaSelecionado(${i})" class="text-frexco/60 hover:text-red-500 ml-0.5 leading-none">✕</button>
         </span>
     `).join('');
@@ -79,11 +80,13 @@ function renderMotoristasLista(query) {
         container.innerHTML = '<p class="text-xs text-gray-400 text-center py-4">Nenhum motorista encontrado</p>';
         return;
     }
+    // Na busca aparecem líderes e motoristas do cadastro inteiro: mesmo nome → "Comissão" x "Rotas"
+    const nomesLideres = nomesDeLideres(ativos, prestadoresList);
     // argJs: IDs de líder/manual ("L3", "M5") precisam ir entre aspas no onclick
     container.innerHTML = filtrados.map(p => `
         <div onclick="adicionarMotoristaSelecionado(${argJs(p.vehicleId)}, ${argJs(p.nome || '')})"
             class="flex items-center gap-2 px-3 py-2 hover:bg-frexco/5 cursor-pointer transition-colors">
-            <span class="font-medium text-gray-800 text-sm flex-1">${p.nome}</span>
+            <span class="font-medium text-gray-800 text-sm flex-1">${rotuloMotorista(p, prestadoresList, nomesLideres)}</span>
             ${p.time ? `<span class="text-xs text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">${p.time}</span>` : ''}
         </div>
     `).join('');
@@ -103,8 +106,13 @@ async function salvarMotoristasDaNota() {
 
     const CAMPOS = ['motoristasNaNota', 'motoristasManual', 'motoristasEditadoEm', 'motoristasEditadoPor',
                     'temContrato', 'temContratoStatus', 'nomeContrato', '_spFileName'];
+    // Alocação de recebível de motorista que saiu da nota é descartada. Só entra na gravação
+    // se mudou, para não sobrescrever alocações que outro usuário gravou nesse meio-tempo.
+    const alocacoes = descartarAlocacoesSemMotorista(nota.alocacoesRecebivel, _motoristasModalSelecionados);
+    if (alocacoes.length !== (nota.alocacoesRecebivel || []).length) CAMPOS.push('alocacoesRecebivel');
     const anterior = Object.fromEntries(CAMPOS.map(c => [c, nota[c]]));
 
+    if (CAMPOS.includes('alocacoesRecebivel')) nota.alocacoesRecebivel = alocacoes;
     nota.motoristasNaNota    = _motoristasModalSelecionados.map(m => ({...m}));
     nota.motoristasManual    = true;
     nota.motoristasEditadoEm = new Date().toISOString();
@@ -119,7 +127,13 @@ async function salvarMotoristasDaNota() {
     if (useSharePoint) {
         const btn = document.getElementById('btnSalvarMotoristasNota');
         if (btn) { btn.disabled = true; btn.textContent = 'Salvando...'; }
-        const salvou = await persistirNotaEditada(nota, CAMPOS.filter(c => c !== '_spFileName'));
+        // Em conflito, o descarte é refeito sobre as alocações remotas: as que outro usuário
+        // gravou para motoristas que continuam na nota são preservadas.
+        const novaLista = nota.motoristasNaNota;
+        const mesclar = CAMPOS.includes('alocacoesRecebivel')
+            ? (remoto) => ({ valores: { alocacoesRecebivel: descartarAlocacoesSemMotorista(remoto.alocacoesRecebivel, novaLista) }, conflitos: [] })
+            : undefined;
+        const salvou = await persistirNotaEditada(nota, CAMPOS.filter(c => c !== '_spFileName'), mesclar);
         if (btn) { btn.disabled = false; btn.textContent = 'Salvar'; }
         if (!salvou) {
             // Desfaz em memória para a tela não mostrar algo que os outros usuários não verão;

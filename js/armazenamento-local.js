@@ -2,11 +2,27 @@
 // INDEXEDDB — prestadores quando o SharePoint não está conectado + migrações
 // ========================================
 
+// Versão 2: a versão anterior podia deixar o banco na v1 SEM a store 'prestadores' (a
+// migração abria o banco sem onupgradeneeded e criava um banco vazio no primeiro acesso),
+// e daí em diante toda abertura dava "One of the specified object stores was not found".
+// Subir a versão faz o onupgradeneeded rodar nesses navegadores e criar a store que falta;
+// bancos v1 com a store e dados passam para a v2 sem tocar nos dados.
+const PRESTADORES_DB_NOME = 'FrexcoPrestadoresDB';
+const PRESTADORES_DB_VERSAO = 2;
+
 async function initPrestadoresDB() {
     return new Promise((resolve, reject) => {
-        const req = indexedDB.open('FrexcoPrestadoresDB', 1);
-        req.onsuccess = () => { prestadoresDB = req.result; resolve(); };
+        const req = indexedDB.open(PRESTADORES_DB_NOME, PRESTADORES_DB_VERSAO);
+        req.onsuccess = () => {
+            prestadoresDB = req.result;
+            // Outra aba com versão mais nova: libera o banco para o upgrade dela
+            prestadoresDB.onversionchange = () => { prestadoresDB.close(); prestadoresDB = null; };
+            resolve();
+        };
         req.onerror = () => reject(req.error);
+        req.onblocked = () => {
+            alert('O Gestor de Pagamentos está aberto em outra aba com uma versão anterior.\n\nFeche as outras abas do app e recarregue esta página.');
+        };
         req.onupgradeneeded = (e) => {
             const db = e.target.result;
             if (!db.objectStoreNames.contains('prestadores')) {
@@ -14,6 +30,36 @@ async function initPrestadoresDB() {
                 store.createIndex('cnpj', 'cnpj', { unique: false });
             }
         };
+    });
+}
+
+// Abre um banco só se ele já existir (qualquer versão), sem criar banco vazio: se o open
+// precisaria criar o banco, a transação de upgrade é abortada e o resultado é null.
+// Quem chama deve fechar o banco (db.close()) para não bloquear upgrades futuros.
+function abrirBancoExistente(nome) {
+    return new Promise(resolve => {
+        let criando = false;
+        const req = indexedDB.open(nome);
+        req.onupgradeneeded = (e) => {
+            criando = true;
+            e.target.transaction.abort();
+        };
+        req.onsuccess = () => {
+            if (criando) { req.result.close(); resolve(null); return; }
+            resolve(req.result);
+        };
+        req.onerror = (e) => { e?.preventDefault?.(); resolve(null); };
+        req.onblocked = () => resolve(null);
+    });
+}
+
+// Lê todos os registros de uma store de um banco já aberto (vazio se a store não existir).
+function lerTodosDaStore(db, nomeStore) {
+    return new Promise(resolve => {
+        if (!db || !db.objectStoreNames.contains(nomeStore)) { resolve([]); return; }
+        const r = db.transaction([nomeStore], 'readonly').objectStore(nomeStore).getAll();
+        r.onsuccess = () => resolve(r.result || []);
+        r.onerror = () => resolve([]);
     });
 }
 
@@ -74,33 +120,17 @@ function migratePrestadoresData(data) {
     });
 }
 
+// Migra o banco legado FrexcoPixDB para prestadores, se ainda não houver prestadores locais.
+// Só lê bancos que já existem (abrirBancoExistente): o primeiro acesso não cria banco vazio.
 async function migrateFromLegacyDBs() {
-    const hasPrestadores = await new Promise(resolve => {
-        const req = indexedDB.open('FrexcoPrestadoresDB', 1);
-        req.onsuccess = () => {
-            const db = req.result;
-            if (!db.objectStoreNames.contains('prestadores')) { resolve(false); return; }
-            const tx = db.transaction(['prestadores'], 'readonly');
-            const r = tx.objectStore('prestadores').count();
-            r.onsuccess = () => resolve(r.result > 0);
-            r.onerror = () => resolve(false);
-        };
-        req.onerror = () => resolve(false);
-    });
-    if (hasPrestadores) return;
+    const dbPrestadores = await abrirBancoExistente(PRESTADORES_DB_NOME);
+    const prestadoresExistentes = await lerTodosDaStore(dbPrestadores, 'prestadores');
+    dbPrestadores?.close();
+    if (prestadoresExistentes.length > 0) return;
 
-    const legacyPix = await new Promise(resolve => {
-        const req = indexedDB.open('FrexcoPixDB', 1);
-        req.onsuccess = () => {
-            const db = req.result;
-            if (!db.objectStoreNames.contains('motoristas')) { resolve([]); return; }
-            const tx = db.transaction(['motoristas'], 'readonly');
-            const r = tx.objectStore('motoristas').getAll();
-            r.onsuccess = () => resolve(r.result || []);
-            r.onerror = () => resolve([]);
-        };
-        req.onerror = () => resolve([]);
-    });
+    const dbPix = await abrirBancoExistente('FrexcoPixDB');
+    const legacyPix = await lerTodosDaStore(dbPix, 'motoristas');
+    dbPix?.close();
 
     if (legacyPix.length === 0) return;
     for (const p of legacyPix) {

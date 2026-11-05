@@ -4,12 +4,13 @@
 
 // Grava a nota editada no SharePoint e avisa o usuário se a alteração não foi compartilhada.
 // campos: os campos que esta edição alterou (em conflito, só eles são reaplicados).
-async function persistirNotaEditada(nota, campos) {
+// mesclar (opcional): mescla própria de alguns campos em conflito (ver saveNotaSP).
+async function persistirNotaEditada(nota, campos, mesclar) {
     if (!useSharePoint) {
         alert('⚠️ SharePoint não conectado: a alteração ficou só neste navegador e será perdida ao recarregar.\n\nConecte o SharePoint e salve novamente para compartilhar com os outros usuários.');
         return false;
     }
-    const res = await saveNotaSP(nota, { campos });
+    const res = await saveNotaSP(nota, { campos, mesclar });
     if (!res.ok) {
         alert(`❌ Não foi possível salvar a nota "${nota.arquivo}" no SharePoint (${res.mensagem}).\n\nA alteração NÃO foi compartilhada. Tente novamente; se persistir, reconecte o SharePoint.`);
         return false;

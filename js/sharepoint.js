@@ -232,6 +232,9 @@ const mesmoValor = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? n
 //                da memória, como o responsável recalculado).
 // opcoes.abortarSeRemotoTiver: nome de campo; se após um 412 a versão remota já tiver esse
 //                campo definido, não grava e adota a versão remota em memória (abortado: true).
+// opcoes.mesclar(remoto, base): em 412, calcula os valores a reaplicar sobre a versão remota
+//                (granularidade menor que o campo inteiro). Retorna { valores, conflitos };
+//                campos de `campos` ausentes em `valores` seguem a mescla genérica.
 // Retorna { ok, abortado?, mensagem?, conflitos: [campos alterados também por outro usuário] }.
 async function saveNotaSP(nota, opcoes = {}) {
     if (!spAccessToken) return { ok: false, mensagem: 'SharePoint não conectado', conflitos: [] };
@@ -272,12 +275,16 @@ async function saveNotaSP(nota, opcoes = {}) {
                 registrarVersaoNotaSP(nota, remoto.eTag, remoto.nota);
                 return { ok: true, abortado: true, conflitos };
             }
-            const meus = Object.fromEntries(campos.map(c => [c, nota[c]]));
-            campos.forEach(c => {
+            // Campos devolvidos por `mesclar` usam a mescla própria; os demais, a genérica
+            const mescla = opcoes.mesclar ? opcoes.mesclar(remoto.nota, versao.base) : { valores: {}, conflitos: [] };
+            const genericos = campos.filter(c => !(c in mescla.valores));
+            const meus = { ...Object.fromEntries(genericos.map(c => [c, nota[c]])), ...mescla.valores };
+            genericos.forEach(c => {
                 if (!mesmoValor(remoto.nota[c], versao.base[c]) && !mesmoValor(remoto.nota[c], nota[c]) && !conflitos.includes(c)) {
                     conflitos.push(c);
                 }
             });
+            mescla.conflitos.forEach(c => { if (!conflitos.includes(c)) conflitos.push(c); });
             Object.keys(nota).forEach(k => { if (!(k in remoto.nota) && !campos.includes(k)) delete nota[k]; });
             Object.assign(nota, remoto.nota, meus);
             registrarVersaoNotaSP(nota, remoto.eTag, remoto.nota);

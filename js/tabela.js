@@ -129,8 +129,9 @@ function renderRow(row) {
     const responsavelCell = `<span class="font-medium text-gray-800 truncate block max-w-[130px]" title="${responsavelNome}">${responsavelNome}</span>`;
 
     const motoristas = row.motoristasNaNota || (row.responsavel ? [row.responsavel] : []);
+    const rotulos = rotulosMotoristas(motoristas, prestadoresList); // "Jorge Comissão" / "Jorge Rotas"
     const motoristasChips = motoristas.length > 0
-        ? motoristas.map(m => `<span class="inline-block bg-blue-50 text-blue-700 border border-blue-200 rounded px-1.5 py-0.5 text-[10px] font-medium truncate max-w-[90px]" title="${m.nome}">${m.nome}</span>`).join('')
+        ? rotulos.map(r => `<span class="inline-block bg-blue-50 text-blue-700 border border-blue-200 rounded px-1.5 py-0.5 text-[10px] font-medium truncate max-w-[90px]" title="${r}">${r}</span>`).join('')
         : `<span class="text-gray-400 text-xs italic">—</span>`;
     const motoristasCell = `
         <div class="flex items-center gap-1 flex-wrap">

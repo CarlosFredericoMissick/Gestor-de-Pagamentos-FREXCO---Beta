@@ -100,6 +100,7 @@ async function gerarZipNotas() {
                 const motoristas = (nota.motoristasNaNota && nota.motoristasNaNota.length > 0)
                     ? nota.motoristasNaNota
                     : (nota.responsavel ? [nota.responsavel] : []);
+                // Nome puro, como no original: rótulos "Comissão"/"Rotas" ficam só nas telas e XLSX
                 const nomesMotoristas = motoristas
                     .map(m => (m.nome || '').replace(/[/\\:*?"<>|]/g, '_').trim())
                     .filter(Boolean)
@@ -195,9 +196,15 @@ function exportarConciliacaoExcel() {
     if (_concilRows.length === 0) { alert('Rode a conciliação primeiro.'); return; }
     const wb = XLSX.utils.book_new();
     const data = [['Arquivo','Responsável','Motoristas','Data Emissão','Valor Nota','Valor Devido','Diferença','Dif %','Status']];
+    // Texto visível de cada célula, sem botões e avisos da tela (data-export-ignorar)
+    const textoCelula = (td) => {
+        const copia = td.cloneNode(true);
+        copia.querySelectorAll('[data-export-ignorar]').forEach(el => el.remove());
+        return copia.textContent.trim();
+    };
     _concilRows.forEach(r => {
         const cells = r.tr.querySelectorAll('td');
-        data.push([...cells].map(td => td.textContent.trim()));
+        data.push([...cells].map(textoCelula));
     });
     const ws = XLSX.utils.aoa_to_sheet(data);
     ws['!cols'] = data[0].map(() => ({ wch: 18 }));
@@ -215,14 +222,20 @@ function exportarDetalheMotoristaExcel() {
     const { nome, isLider, resultado } = _concilDetalheAtual;
     const fmtDate = d => (d instanceof Date ? d : new Date(d)).toLocaleDateString('pt-BR');
     const wb = XLSX.utils.book_new();
+    // Última coluna: rota fracionada pela divisão do recebível (valor total da rota original)
     const linhaMotorista = r => [
         fmtDate(r.data), r.nome||'', r.rota||'',
-        r.valorRotas, r.ajuste, r.adicional, r.descarga||0, r.suporte, r.totalMotorista
+        r.valorRotas, r.ajuste, r.adicional, r.descarga||0, r.suporte, r.totalMotorista,
+        r.parcial ? r.totalOriginal : ''
+    ];
+    const resumo = [
+        ['Motoristas na nota', rotulosMotoristas(resultado.motoristas, prestadoresList).join(', ')],
+        ...descreverDivisaoNaNota(resultado).map(t => ['Divisão do recebível', t])
     ];
 
     if (isLider) {
         // Aba 1: Motoristas na nota
-        const dataM = [['Data','Veículo','Rota','Valor Rotas','Ajuste','Adicional','Descarga','Suporte','Total']];
+        const dataM = [['Data','Veículo','Rota','Valor Rotas','Ajuste','Adicional','Descarga','Suporte','Total','Parcial: total da rota']];
         resultado.linhasMotoristas.forEach(r => dataM.push(linhaMotorista(r)));
         const wsM = XLSX.utils.aoa_to_sheet(dataM);
         wsM['!cols'] = [{wch:12},{wch:20},{wch:10},{wch:14},{wch:12},{wch:14},{wch:12},{wch:14}];
@@ -241,12 +254,15 @@ function exportarDetalheMotoristaExcel() {
 
     } else {
         // Motorista normal — aba única
-        const data = [['Data','Veículo','Rota','Valor Rotas','Ajuste','Adicional','Descarga','Suporte','Total Motorista']];
+        const data = [['Data','Veículo','Rota','Valor Rotas','Ajuste','Adicional','Descarga','Suporte','Total Motorista','Parcial: total da rota']];
         resultado.linhasMotoristas.forEach(r => data.push(linhaMotorista(r)));
         const ws = XLSX.utils.aoa_to_sheet(data);
         ws['!cols'] = [{wch:12},{wch:20},{wch:10},{wch:14},{wch:12},{wch:14},{wch:12},{wch:16}];
         XLSX.utils.book_append_sheet(wb, ws, (nome||'Detalhe').slice(0,31));
     }
+    const wsR = XLSX.utils.aoa_to_sheet(resumo);
+    wsR['!cols'] = [{wch:22},{wch:90}];
+    XLSX.utils.book_append_sheet(wb, wsR, 'Resumo');
 
     XLSX.writeFile(wb, `detalhe_${(nome||'motorista').replace(/\s/g,'_')}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
