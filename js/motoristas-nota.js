@@ -72,7 +72,7 @@ function renderMotoristasLista(query) {
 
     const ativos = prestadoresList.filter(p => p.inUse !== false);
     const filtrados = ativos.filter(p =>
-        (!q || (p.nome || '').toLowerCase().includes(q)) &&
+        prestadorCorrespondeBusca(p, q) &&
         !selecionadosIds.has(idMotorista(p.vehicleId))
     ).slice(0, 50);
 

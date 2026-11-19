@@ -100,6 +100,20 @@ async function excluirNotasSelecionadas() {
     }
 }
 
+// "X com problema · Y OCR pendente · Z líquido calculado" das notas visíveis (mesmo filtro da tabela)
+function atualizarResumoDestaques(notas) {
+    const el = document.getElementById('resumoDestaquesNotas');
+    if (!el) return;
+    const estados = notas.map(estadoLinhaNota);
+    const problemas = estados.filter(e => e.estado === 'problema').length;
+    const ocrPendentes = estados.filter(e => e.ocrPendente).length;
+    const liquidosCalculados = estados.filter(e => e.avisoPendente).length;
+    document.getElementById('resumoProblemas').textContent = problemas;
+    document.getElementById('resumoOcrPendente').textContent = ocrPendentes;
+    document.getElementById('resumoLiquidoCalculado').textContent = liquidosCalculados;
+    el.classList.toggle('hidden', problemas === 0 && ocrPendentes === 0 && liquidosCalculados === 0);
+}
+
 function updateCoverageStats() {
     const fmtMoney = (v) => (v || 0).toLocaleString('pt-BR', {style: 'currency', currency: 'BRL'});
     const filtradas = getNotasFiltradas();
@@ -115,6 +129,8 @@ function updateCoverageStats() {
             btnExport.disabled = true;
         }
     }
+
+    atualizarResumoDestaques(filtradas);
 
     if (extractedResults.length === 0) {
         document.getElementById('statsPanel').classList.add('hidden');
@@ -239,6 +255,18 @@ function abrirOcrEdit(notaIdx) {
     document.getElementById('ocrVLiquido').value     = r.vLiquido || '';
     document.getElementById('ocrDataEmissao').value  = r.dataEmissao || '';
     document.getElementById('ocrModelo').value       = r.modelo || '';
+    // Mesmo modal para OCR e para nota com valor líquido calculado (avisoExtracao)
+    const ehOcr = r.method === 'OCR';
+    document.getElementById('ocrEditTitulo').textContent = ehOcr ? 'Editar Campos — Nota OCR' : 'Revisar Valores — Líquido calculado';
+    const avisoEl = document.getElementById('ocrEditAviso');
+    avisoEl.textContent = r.avisoExtracao ? (r.avisoExtracaoDetalhe || 'Valor líquido calculado: confira com o PDF.') : '';
+    avisoEl.classList.toggle('hidden', !r.avisoExtracao);
+    document.getElementById('ocrRevisado').checked   = !!r.ocrRevisado;
+    document.getElementById('ocrRevisadoInfo').textContent = r.ocrRevisado
+        ? `Revisada${r.ocrRevisadoPor ? ` por ${r.ocrRevisadoPor}` : ''}${r.ocrRevisadoEm ? ` em ${new Date(r.ocrRevisadoEm).toLocaleString('pt-BR')}` : ''}. Desmarque para voltar a pendente.`
+        : ehOcr
+            ? 'Enquanto não marcado, a linha fica em laranja como OCR pendente de revisão.'
+            : 'Enquanto não marcado, a linha fica em amarelo como valor líquido a conferir.';
     document.getElementById('ocrEditModal').classList.remove('hidden');
     lucide.createIcons();
 }
@@ -248,9 +276,21 @@ function fecharOcrEdit() {
     document.getElementById('ocrEditModal').classList.add('hidden');
 }
 
+const CAMPOS_REVISAO_OCR = ['ocrRevisado', 'ocrRevisadoEm', 'ocrRevisadoPor'];
+
+// Cópia de campos da nota para desfazer uma edição que não foi gravada
+function clonarCampos(nota, campos) {
+    return Object.fromEntries(campos.map(c => [c, nota[c] === undefined ? undefined : JSON.parse(JSON.stringify(nota[c]))]));
+}
+
+function restaurarCampos(nota, copia) {
+    Object.entries(copia).forEach(([c, v]) => { if (v === undefined) delete nota[c]; else nota[c] = v; });
+}
+
 async function salvarOcrEdit() {
     if (_ocrEditIdx === null) return;
     const r = extractedResults[_ocrEditIdx];
+    const anterior = clonarCampos(r, [...CAMPOS_EDICAO_OCR, 'motoristasNaNota', ...CAMPOS_REVISAO_OCR, '_spFileName']);
 
     r.prestador   = document.getElementById('ocrPrestador').value.trim();
     r.cnpj        = document.getElementById('ocrCnpj').value.trim();
@@ -274,7 +314,25 @@ async function salvarOcrEdit() {
     r.temContratoStatus = contratoInfoM.status;
     r.nomeContrato      = contratoInfoM.contrato;
 
-    await persistirNotaEditada(r, campos);
+    // Revisão OCR: só entra na gravação se mudou, para não desfazer a revisão marcada por
+    // outro usuário enquanto este modal estava aberto
+    const revisado = document.getElementById('ocrRevisado').checked;
+    if (revisado !== !!r.ocrRevisado) {
+        r.ocrRevisado    = revisado;
+        r.ocrRevisadoEm  = revisado ? new Date().toISOString() : null;
+        r.ocrRevisadoPor = revisado ? (spAccount?.name || spAccount?.username || null) : null;
+        campos.push(...CAMPOS_REVISAO_OCR);
+    }
+
+    const btn = document.getElementById('btnSalvarOcr');
+    if (btn) { btn.disabled = true; btn.textContent = 'Salvando...'; }
+    const salvou = await persistirNotaEditada(r, campos);
+    if (btn) { btn.disabled = false; btn.textContent = 'Salvar alterações'; }
+    if (useSharePoint && !salvou) {
+        // Desfaz em memória (a tela não mostra o que os outros não verão); modal fica aberto
+        restaurarCampos(r, anterior);
+        return;
+    }
 
     // Re-renderizar tabela
     const tbody = document.getElementById('resultsBody');

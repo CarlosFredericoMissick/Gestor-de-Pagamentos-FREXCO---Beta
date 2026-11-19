@@ -84,19 +84,15 @@ async function sincronizarLideres() {
 // Render lista de líderes
 function renderLideresList() {
     const lideres = getLideres();
-    const query = (document.getElementById('lideresSearch')?.value || '').toLowerCase().trim();
+    const query = document.getElementById('lideresSearch')?.value || '';
     const container = document.getElementById('lideresListContainer');
     if (!container) return;
     document.getElementById('lideresCount').textContent = lideres.length;
-    document.getElementById('lideresListCount').textContent = lideres.length;
 
-    const visiveis = lideres.filter(l => {
-        if (!query) return true;
-        if ((l.nome || '').toLowerCase().includes(query)) return true;
-        const qd = query.replace(/\D/g, '');
-        if (qd && Array.isArray(l.cnpjs) && l.cnpjs.some(c => (c.cnpj||'').replace(/\D/g,'').includes(qd))) return true;
-        return false;
-    });
+    // Mesma busca da aba Prestadores: sem acento/caixa, por nome ou time, CNPJ com ou sem máscara
+    const visiveis = lideres.filter(l => prestadorCorrespondeBusca(l, query));
+    document.getElementById('lideresListCount').textContent =
+        query.trim() ? `${visiveis.length} de ${lideres.length}` : lideres.length;
 
     if (visiveis.length === 0) {
         container.innerHTML = '<p class="text-sm text-gray-400 text-center py-10">Nenhum líder encontrado.</p>';
@@ -197,10 +193,13 @@ function removerMotoristaLider(idx) {
 function filtrarMotoristasLider(query) {
     const sugestoes = document.getElementById('liderMotoristaSugestoes');
     if (!query.trim()) { sugestoes.classList.add('hidden'); return; }
+    // idMotorista: vinculados são gravados com ID string ('101') e o cadastro tem número (101);
+    // a comparação estrita deixava o motorista já vinculado aparecer de novo (e duplicar).
+    const vinculados = new Set(_liderMotoristasTemp.map(m => idMotorista(m.vehicleId)));
     const motoristas = prestadoresList.filter(p =>
         p.tipo !== 'lider' && p.inUse !== false &&
-        (p.nome || '').toLowerCase().includes(query.toLowerCase()) &&
-        !_liderMotoristasTemp.some(m => m.vehicleId === p.vehicleId)
+        prestadorCorrespondeBusca(p, query) &&
+        !vinculados.has(idMotorista(p.vehicleId))
     ).slice(0, 8);
     if (motoristas.length === 0) { sugestoes.classList.add('hidden'); return; }
     sugestoes.innerHTML = motoristas.map(m =>
@@ -214,14 +213,30 @@ function filtrarMotoristasLider(query) {
 }
 
 function adicionarMotoristaLider(vehicleId, nome) {
+    if (_liderMotoristasTemp.some(m => idMotorista(m.vehicleId) === idMotorista(vehicleId))) return;
     _liderMotoristasTemp.push({ vehicleId, nome });
     document.getElementById('liderMotoristaBusca').value = '';
     document.getElementById('liderMotoristaSugestoes').classList.add('hidden');
     renderLiderMotoristasVinculados();
 }
 
+// Evita segunda execução enquanto a primeira grava (duplo clique em Salvar)
+let _salvandoLider = false;
+
 async function saveLiderEntry() {
-    if (_liderEditIdx === null) return;
+    if (_liderEditIdx === null || _salvandoLider) return;
+    _salvandoLider = true;
+    const btn = document.getElementById('btnSalvarLider');
+    if (btn) { btn.disabled = true; btn.textContent = 'Salvando...'; }
+    try {
+        await gravarLiderEditado();
+    } finally {
+        _salvandoLider = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Salvar'; }
+    }
+}
+
+async function gravarLiderEditado() {
     const l = prestadoresList[_liderEditIdx];
 
     // Coletar CNPJs

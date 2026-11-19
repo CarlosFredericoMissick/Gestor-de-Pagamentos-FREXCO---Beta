@@ -489,7 +489,20 @@ function cancelPrestadorForm() {
     document.getElementById('prestadorForm').classList.add('hidden');
 }
 
+// Evita segunda execução enquanto a primeira grava (duplo clique duplicaria um novo prestador)
+let _salvandoPrestador = false;
+
 async function savePrestadorEntry() {
+    if (_salvandoPrestador) return;
+    _salvandoPrestador = true;
+    try {
+        await gravarPrestadorDoFormulario();
+    } finally {
+        _salvandoPrestador = false;
+    }
+}
+
+async function gravarPrestadorDoFormulario() {
     const nome  = document.getElementById('prestadorNome').value.trim();
     const cnpjs = getCnpjRowsData();
     if (!nome) { alert('Preencha o nome do motorista.'); return; }
@@ -580,25 +593,22 @@ function updatePrestadoresUI() {
 
     const bar = document.getElementById('prestadoresSelectAllBar');
     const container = document.getElementById('prestadoresListContainer');
-    const query = (document.getElementById('prestadoresSearch')?.value || '').toLowerCase().trim();
+    const query = document.getElementById('prestadoresSearch')?.value || '';
     const filtroPix      = document.getElementById('filtroPix')?.checked || false;
     const filtroContrato = document.getElementById('filtroContrato')?.checked || false;
 
-    const queryDigits = query.replace(/\D/g, '');
+    // Busca sem acento/caixa por nome, time, CD e ID; CNPJ com ou sem máscara (regras.js)
     const visiveis = ativos.filter(p => {
         if (p.tipo === 'lider') return false; // líderes ficam na aba Líderes
-        if (query && !(
-            (p.nome || '').toLowerCase().includes(query) ||
-            (p.time || '').toLowerCase().includes(query) ||
-            (p.cd || '').toLowerCase().includes(query) ||
-            (p.vehicleId && String(p.vehicleId).toLowerCase().includes(query)) ||
-            (queryDigits.length > 0 && Array.isArray(p.cnpjs) &&
-                p.cnpjs.some(c => (c.cnpj||'').replace(/\D/g,'').includes(queryDigits)))
-        )) return false;
+        if (!prestadorCorrespondeBusca(p, query)) return false;
         if (filtroPix && !(Array.isArray(p.cnpjs) && p.cnpjs.some(c => c.chavePix && c.chavePix.trim()))) return false;
         if (filtroContrato && !p.contrato) return false;
         return true;
     });
+    // Contador ao lado da busca acompanha o filtro ("12 de 340 ativo(s)")
+    const filtrando = query.trim() !== '' || filtroPix || filtroContrato;
+    document.getElementById('prestadoresSavedCount').textContent =
+        filtrando ? `${visiveis.length} de ${ativos.length}` : ativos.length;
 
     if (ativos.length === 0) {
         container.innerHTML = '<p class="text-sm text-gray-400 text-center py-10">Nenhum motorista ativo. Importe a planilha base.</p>';

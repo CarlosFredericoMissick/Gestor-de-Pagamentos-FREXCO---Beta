@@ -96,9 +96,41 @@ function updateSortIcons() {
     }
 }
 
+// Destaque da linha (estadoLinhaNota em regras.js). Fundo, em ordem de prioridade:
+//   vermelho claro  = problema (PIX faltante ou CNPJ sem cadastro): impede o pagamento;
+//   amarelo claro   = valor líquido calculado pelo extrator, a conferir: o valor pode estar errado;
+//   laranja claro   = OCR pendente de revisão.
+// Indicadores independentes do fundo: ícone de alerta no R$ Líq (líquido calculado) e borda
+// esquerda laranja (OCR pendente), para nenhuma pendência sumir sob outra cor.
+// As classes são literais completas: o Tailwind via CDN gera o CSS ao vê-las no DOM.
+function destaqueLinhaNota(row) {
+    const { problemas, ocrPendente, avisoPendente, aviso, estado } = estadoLinhaNota(row);
+    const fundo = estado === 'problema' ? 'bg-red-50 hover:bg-red-100'
+        : estado === 'avisoExtracao' ? 'bg-yellow-50 hover:bg-yellow-100'
+        : estado === 'ocrPendente' ? 'bg-orange-50 hover:bg-orange-100'
+        : 'hover:bg-primary/5';
+    const avisos = [];
+    if (problemas.length) avisos.push(`Problema: ${problemas.join('; ')}`);
+    if (avisoPendente) avisos.push(`${aviso} (abra "Revisar valores" para corrigir e confirmar a revisão)`);
+    if (ocrPendente) avisos.push('OCR pendente de revisão (abra "Editar campos OCR" e confirme a revisão)');
+    return {
+        trClass: `${fundo} transition-colors border-b border-gray-100`,
+        primeiraCelula: ocrPendente ? 'border-l-4 border-l-orange-400' : '',
+        iconeLiquido: avisoPendente
+            ? `<span class="inline-flex align-middle ml-1 text-yellow-600" title="${aviso}" aria-label="Valor líquido calculado: confira"><svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span>`
+            : '',
+        titulo: avisos.join('\n'),
+        estado,
+        ocrPendente
+    };
+}
+
 function renderRow(row) {
     const tr = document.createElement('tr');
-    tr.className = "hover:bg-primary/5 transition-colors border-b border-gray-100";
+    const destaque = destaqueLinhaNota(row);
+    tr.className = destaque.trClass;
+    if (destaque.titulo) tr.title = destaque.titulo;
+    tr.dataset.destaque = destaque.estado;
     const notaIdx = extractedResults.indexOf(row);
     tr.dataset.notaIdx = notaIdx;
 
@@ -114,8 +146,11 @@ function renderRow(row) {
     const nfColor = row.numeroNF === "?" ? "text-red-600 font-bold" : "text-gray-600";
     const modeloDisplay = row.method === "OCR" ? `OCR - ${row.modelo}` : row.modelo;
     const modeloColor = row.method === "OCR" ? "text-orange-600 font-semibold" : "text-primary font-medium";
+    // Edição manual de campos: notas OCR (como antes) e notas com valor líquido calculado
     const ocrEditBtn = row.method === "OCR"
         ? `<button onclick="abrirOcrEdit(${notaIdx})" class="ml-1 p-0.5 text-orange-500 hover:text-orange-700 rounded transition-colors flex-shrink-0 inline-flex" title="Editar campos OCR"><svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>`
+        : row.avisoExtracao
+        ? `<button onclick="abrirOcrEdit(${notaIdx})" class="ml-1 p-0.5 text-yellow-600 hover:text-yellow-800 rounded transition-colors flex-shrink-0 inline-flex" title="Revisar valores (líquido calculado)"><svg xmlns="http://www.w3.org/2000/svg" class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>`
         : '';
 
     const contratoStatus = row.temContratoStatus || (row.temContrato ? 'sim' : 'nao');
@@ -142,7 +177,7 @@ function renderRow(row) {
         </div>`;
 
     tr.innerHTML = `
-        <td class="px-3 py-2">
+        <td class="px-3 py-2 ${destaque.primeiraCelula}">
             <input type="checkbox" class="nota-checkbox w-4 h-4 accent-frexco cursor-pointer" data-idx="${notaIdx}" onchange="onNotaCheckChange()">
         </td>
         <td class="px-3 py-2 max-w-[130px]">
@@ -154,7 +189,7 @@ function renderRow(row) {
         <td class="px-3 py-2 max-w-[160px]">${motoristasCell}</td>
         <td class="px-3 py-2 truncate max-w-[160px]" title="${row.prestador}">${row.prestador}</td>
         <td class="px-3 py-2 text-[10px] font-mono text-gray-500">${row.cnpj || '-'}</td>
-        <td class="px-3 py-2 text-gray-600">${fmtMoney(row.vLiquido)}</td>
+        <td class="px-3 py-2 text-gray-600 whitespace-nowrap">${fmtMoney(row.vLiquido)}${destaque.iconeLiquido}</td>
         <td class="px-3 py-2 font-bold text-primary">${fmtMoney(row.vServico)}</td>
         <td class="px-3 py-2 text-gray-500">${row.dataEmissao || '-'}</td>
         <td class="px-3 py-2 ${nfColor}">${row.numeroNF}</td>

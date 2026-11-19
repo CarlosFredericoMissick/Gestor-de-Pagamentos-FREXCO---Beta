@@ -618,6 +618,65 @@ function rotuloMotorista(m, prestadores, nomesLideres = new Set()) {
     return nome;
 }
 
+// ========================================
+// DESTAQUE DA LINHA NA TABELA DE NOTAS (derivado, não gravado)
+// - problema: CNPJ sem prestador cadastrado (coluna Responsável sem cadastro, mesmo critério
+//   de `responsavel`, que o reprocessamento deriva do CNPJ) ou PIX faltante (mesmo critério do
+//   card "Cobertura PIX": chavePix vazia). Some ao cadastrar e reprocessar.
+// - avisoPendente: valor líquido que o extrator não leu da coluna "VALOR LÍQUIDO" e calculou
+//   (nota.avisoExtracao, gravado na extração), ainda não revisado.
+// - ocrPendente: nota extraída por OCR (method === 'OCR') ainda não revisada.
+// A revisão é uma só para os dois ("Confirmo que revisei os dados desta nota"): grava
+// ocrRevisado (nome mantido por compatibilidade com as notas OCR já revisadas no SharePoint).
+// estado (fundo da linha), em ordem de prioridade:
+//   'problema' (impede o pagamento) > 'avisoExtracao' (valor a pagar pode estar errado) >
+//   'ocrPendente' (dados a conferir) > 'ok'.
+// As pendências de revisão continuam sinalizadas à parte (ícone no R$ Líq e borda laranja),
+// porque são independentes do fundo.
+// ========================================
+
+function estadoLinhaNota(nota) {
+    const problemas = [];
+    if (!nota.responsavel) {
+        problemas.push(nota.cnpj ? `CNPJ ${nota.cnpj} não cadastrado` : 'CNPJ não identificado na nota');
+    }
+    if (!(nota.chavePix && String(nota.chavePix).trim() !== '')) problemas.push('PIX faltante');
+    const revisada = !!nota.ocrRevisado;
+    const ocrPendente = nota.method === 'OCR' && !revisada;
+    const avisoPendente = !!nota.avisoExtracao && !revisada;
+    return {
+        problemas,
+        ocrPendente,
+        avisoPendente,
+        aviso: avisoPendente ? (nota.avisoExtracaoDetalhe || 'Valor líquido calculado: confira com o PDF.') : null,
+        // Notas que abrem o modal de revisão/edição manual de campos
+        revisavel: nota.method === 'OCR' || !!nota.avisoExtracao,
+        estado: problemas.length > 0 ? 'problema'
+            : avisoPendente ? 'avisoExtracao'
+            : ocrPendente ? 'ocrPendente'
+            : 'ok'
+    };
+}
+
+// ========================================
+// BUSCA DE PRESTADORES (aba Prestadores, Líderes e buscas de motorista)
+// Texto: sem acento e sem caixa; cada palavra da busca precisa aparecer em nome, time,
+// time do líder, CD ou ID (em qualquer ordem). CNPJ: busca só com dígitos e pontuação
+// ("12.345", "12345678", "12.345.678/0001-90"), parcial, com ou sem máscara.
+// ========================================
+
+function prestadorCorrespondeBusca(p, consulta) {
+    const texto = normalizarNome(consulta);
+    if (!texto) return true;
+    const campos = [p.nome, p.time, p.timeVinculado, p.cd, p.vehicleId == null ? '' : String(p.vehicleId)]
+        .map(normalizarNome).join(' | ');
+    if (texto.split(' ').every(palavra => campos.includes(palavra))) return true;
+    const pareceCnpj = /^[\d.\-\/\s]+$/.test(String(consulta).trim());
+    const digitos = String(consulta).replace(/\D/g, '');
+    return pareceCnpj && digitos.length > 0 &&
+        (p.cnpjs || []).some(c => normalizeCnpj(c.cnpj).includes(digitos));
+}
+
 function rotulosMotoristas(lista, prestadores) {
     const nomesLideres = nomesDeLideres(lista, prestadores);
     return (lista || []).map(m => rotuloMotorista(m, prestadores, nomesLideres));
@@ -654,6 +713,8 @@ if (typeof module !== 'undefined' && module.exports) {
         prepararDivisoes,
         rotuloMotorista,
         rotulosMotoristas,
-        nomesDeLideres
+        nomesDeLideres,
+        prestadorCorrespondeBusca,
+        estadoLinhaNota
     };
 }

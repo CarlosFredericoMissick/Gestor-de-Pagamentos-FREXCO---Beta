@@ -393,28 +393,165 @@ function extractDanfseNacional(lines, filename) {
                 }
         }
 
-        // --- Valor do serviço: "VALOR DA OPERAÇÃO / SERVIÇO" ---
-        for (let i = 0; i < lines.length; i++) {
-                if (/VALOR\s+DA\s+OPERA[ÇC][ÃA]O\s*\/\s*SERVI[ÇC]O/i.test(lines[i])) {
+        // --- Valores em colunas ---
+        // No DANFSe os rótulos ficam numa linha e os valores na linha de baixo, em colunas
+        // separadas por 2+ espaços; coluna vazia aparece como "-" (e pode faltar no fim:
+        // "VALOR DA OPERAÇÃO / SERVIÇO  Desconto Incond.  Desconto Cond.  VALOR TOTAL" tem
+        // 4 rótulos e "R$ 5.650,00  -  -" só 3 valores). O valor é o de mesmo índice do rótulo.
+        // Antes o líquido era o 1º valor da linha de baixo, que é a coluna "Total das Retenções".
+        // Retorna o valor (0 para "-"), ou null se o layout não bater.
+        const tokensValor = /^(?:R\$\s*)?[\d]{1,3}(?:\.[\d]{3})*,\d{2}$|^-$/;
+        const valorDaColuna = (regexRotulo) => {
+                for (let i = 0; i < lines.length; i++) {
+                        const rotulos = lines[i].split(/\s{2,}/).map(s => s.trim()).filter(Boolean);
+                        const col = rotulos.findIndex(r => regexRotulo.test(r));
+                        if (col === -1) continue;
                         for (let k = 1; k <= 2 && i + k < lines.length; k++) {
-                                const v = money(lines[i+k]); if (v !== null) { data.vServico = v; break; }
+                                const valores = lines[i+k].split(/\s{2,}/).map(s => s.trim()).filter(Boolean);
+                                if (valores.length === 0 || valores.length > rotulos.length || !valores.every(v => tokensValor.test(v))) continue;
+                                if (col >= valores.length) return null;
+                                return valores[col] === '-' ? 0 : money(valores[col]);
                         }
-                        if (data.vServico) break;
+                        return null;
+                }
+                return null;
+        };
+        const ROTULO_SERVICO   = /^VALOR\s+DA\s+OPERA[ÇC][ÃA]O\s*\/\s*SERVI[ÇC]O$/i;
+        const ROTULO_LIQUIDO   = /^VALOR\s+L[ÍI]QUIDO\s+DA\s+NFS-?E$/i;          // não o "+ IBS/CBS"
+        const ROTULO_RETENCOES = /^Total\s+das\s+Reten[çc][õo]es\b/i;
+
+        // Leitura de fallback (só quando a coluna do líquido falha): acha a coluna pela ordem
+        // dos rótulos conhecidos da linha (funciona com 1 espaço entre eles) e lê os valores por
+        // token ("R$ x,xx" ou "-"), sem depender do espaçamento. Linha de valores com qualquer
+        // outro conteúdo é ilegível (null). Aceita também "Rótulo: R$ x,xx" na mesma linha.
+        const ROTULOS_OPERACAO = [/VALOR\s+DA\s+OPERA[ÇC][ÃA]O\s*\/\s*SERVI[ÇC]O/i, /Desconto\s+Incondicionado/i,
+                                  /Desconto\s+Condicionado/i, /VALOR\s+TOTAL\s+DA\s+NFS-?E/i];
+        const TOKEN_VALOR = /R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}|(?<!\S)-(?!\S)/g;
+        const valorPorRotuloConhecido = (rotulos, alvo) => {
+                const regexAlvo = rotulos[alvo];
+                const mesmaLinha = new RegExp(regexAlvo.source + String.raw`\s*:?\s*(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})`, 'i');
+                for (const l of lines) {
+                        const m = l.match(mesmaLinha);
+                        if (m) return money(m[1]);
+                }
+                const i = lines.findIndex(l => regexAlvo.test(l));
+                if (i === -1) return null;
+                const col = rotulos
+                        .map((r, idx) => ({ idx, pos: lines[i].search(r) }))
+                        .filter(x => x.pos >= 0)
+                        .sort((a, b) => a.pos - b.pos)
+                        .findIndex(x => x.idx === alvo);
+                for (let k = 1; k <= 2 && i + k < lines.length; k++) {
+                        const tokens = lines[i+k].match(TOKEN_VALOR) || [];
+                        if (tokens.length === 0) continue;
+                        if (lines[i+k].replace(TOKEN_VALOR, '').trim() !== '' || col >= tokens.length) return null;
+                        return tokens[col] === '-' ? 0 : money(tokens[col]);
+                }
+                return null;
+        };
+
+        // --- Valor do serviço: coluna "VALOR DA OPERAÇÃO / SERVIÇO" (valor bruto, antes de
+        // desconto; nunca "BC ISSQN") ---
+        data.vServico = valorDaColuna(ROTULO_SERVICO) || 0;
+        if (!data.vServico) {
+                // Regra anterior: 1º valor monetário após o rótulo
+                for (let i = 0; i < lines.length; i++) {
+                        if (/VALOR\s+DA\s+OPERA[ÇC][ÃA]O\s*\/\s*SERVI[ÇC]O/i.test(lines[i])) {
+                                for (let k = 1; k <= 2 && i + k < lines.length; k++) {
+                                        const v = money(lines[i+k]); if (v !== null) { data.vServico = v; break; }
+                                }
+                                if (data.vServico) break;
+                        }
                 }
         }
 
-        // --- Valor líquido: "VALOR LÍQUIDO DA NFS-e" (não o "+ IBS/CBS") ---
-        for (let i = 0; i < lines.length; i++) {
-                const before = (lines[i].split(/VALOR\s+L[ÍI]QUIDO/i)[0]) || "";
-                if (/VALOR\s+L[ÍI]QUIDO\s+DA\s+NFS-?E/i.test(lines[i]) && !/\+\s*IBS/i.test(before)) {
-                        for (let k = 1; k <= 2 && i + k < lines.length; k++) {
-                                const v = money(lines[i+k]); // primeiro valor monetário da linha de valores (pula "-")
-                                if (v !== null) { data.vLiquido = v; break; }
+        // --- Valor líquido: coluna "VALOR LÍQUIDO DA NFS-e" ---
+        // Candidatos em ordem: coluna; regra anterior (1º valor após o rótulo). Sanidade:
+        // Líq ≤ Serv e diferente do "Total das Retenções" (salvo se Serv − Retenções = Líq,
+        // ex.: retenção de 50%). Se nenhum passar e as retenções forem conhecidas, Serv − Ret.
+        // "Total das Retenções" é a 1ª coluna da sua linha: sem layout de colunas, é o 1º valor
+        // após o rótulo (justamente o valor que a regra anterior tomava como líquido)
+        const primeiroValorApos = (regexLinha) => {
+                const i = lines.findIndex(l => regexLinha.test(l));
+                for (let k = 1; i !== -1 && k <= 2 && i + k < lines.length; k++) {
+                        const v = money(lines[i+k]);
+                        if (v !== null) return v;
+                }
+                return null;
+        };
+        // Sem colunas: retenções lidas por token na ordem dos rótulos da linha, com "-" = 0 (o
+        // 1º valor monetário pulava o "-" e pegava o próprio líquido como retenção).
+        const ROTULOS_RETENCOES = [/Total\s+das\s+Reten[çc][õo]es/i, /VALOR\s+L[ÍI]QUIDO\s+DA\s+NFS-?E(?!\s*\+)/i,
+                                   /Total\s+do\s+IBS\s*\/\s*CBS/i, /VALOR\s+L[ÍI]QUIDO\s+DA\s+NFS-?E\s*\+\s*IBS/i];
+        const retencoes = valorDaColuna(ROTULO_RETENCOES)
+                ?? valorPorRotuloConhecido(ROTULOS_RETENCOES, 0)
+                ?? primeiroValorApos(/Total\s+das\s+Reten[çc][õo]es/i);
+        const regraAnterior = () => {
+                for (let i = 0; i < lines.length; i++) {
+                        const before = (lines[i].split(/VALOR\s+L[ÍI]QUIDO/i)[0]) || "";
+                        if (/VALOR\s+L[ÍI]QUIDO\s+DA\s+NFS-?E/i.test(lines[i]) && !/\+\s*IBS/i.test(before)) {
+                                for (let k = 1; k <= 2 && i + k < lines.length; k++) {
+                                        const v = money(lines[i+k]);
+                                        if (v !== null) return v;
+                                }
+                                return null;
                         }
-                        if (data.vLiquido) break;
+                }
+                return null;
+        };
+        const centavos = (v) => Math.round(v * 100);
+        const liquidoPlausivel = (v) => {
+                if (v === null || !(v > 0)) return false;
+                if (data.vServico && centavos(v) > centavos(data.vServico)) return false;
+                if (retencoes && centavos(v) === centavos(retencoes)) {
+                        return !!data.vServico && centavos(data.vServico) - centavos(retencoes) === centavos(v);
+                }
+                return true;
+        };
+        const liquidoDaColuna = valorDaColuna(ROTULO_LIQUIDO);
+        if (liquidoPlausivel(liquidoDaColuna)) {
+                data.vLiquido = liquidoDaColuna; // caminho normal: sem aviso
+        } else {
+                // Fallback: o líquido não veio da coluna "VALOR LÍQUIDO DA NFS-e". A nota fica
+                // marcada (avisoExtracao, gravado no JSON) para revisão na tabela.
+                const fmt = (v) => `R$ ${v.toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.')}`;
+                const anterior = regraAnterior();
+                // Descontos: na NFS-e nacional (como no ABRASF) o líquido é
+                // Serv − Desconto incondicionado − Desconto condicionado − Retenções
+                const descInc  = valorPorRotuloConhecido(ROTULOS_OPERACAO, 1);
+                const descCond = valorPorRotuloConhecido(ROTULOS_OPERACAO, 2);
+                let detalhe;
+                // Com desconto legível, a regra anterior só vale se bater com a conta completa
+                // (a exceção "Serv − Ret = Líq" de liquidoPlausivel ignora o desconto: com
+                // retenção de 50% e desconto ela aceitaria a retenção como líquido)
+                const descontosLidos = (descInc ?? 0) + (descCond ?? 0);
+                const bateComDesconto = (v) => descontosLidos <= 0 || retencoes === null || !data.vServico ||
+                        Math.abs(centavos(v) - (centavos(data.vServico) - centavos(descontosLidos) - centavos(retencoes))) <= 1;
+                if (liquidoPlausivel(anterior) && bateComDesconto(anterior)) {
+                        data.vLiquido = anterior;
+                        detalhe = 'Valor líquido lido fora da coluna "VALOR LÍQUIDO DA NFS-e"';
+                } else if (retencoes !== null && data.vServico) {
+                        const descontos = (descInc ?? 0) + (descCond ?? 0);
+                        const calculado = (centavos(data.vServico) - centavos(descontos) - centavos(retencoes)) / 100;
+                        if (calculado > 0) {
+                                data.vLiquido = calculado;
+                                const partes = [`Serv ${fmt(data.vServico)}`];
+                                if (descInc) partes.push(`Desc. incondicionado ${fmt(descInc)}`);
+                                if (descCond) partes.push(`Desc. condicionado ${fmt(descCond)}`);
+                                partes.push(`Retenções ${fmt(retencoes)}`);
+                                detalhe = `Valor líquido calculado: ${partes.join(' − ')}`;
+                                if (descInc === null || descCond === null) detalhe += ' (desconto não identificado no PDF; considerado zero)';
+                        }
+                }
+                if (!data.vLiquido && data.vServico) {
+                        data.vLiquido = data.vServico;
+                        detalhe = 'Valor líquido não identificado: usado o valor do serviço';
+                }
+                if (data.vLiquido) {
+                        data.avisoExtracao = 'liquido-calculado';
+                        data.avisoExtracaoDetalhe = `${detalhe}. Confira com o PDF.`;
                 }
         }
-        if (!data.vLiquido && data.vServico) data.vLiquido = data.vServico;
         if (!data.vServico && data.vLiquido) data.vServico = data.vLiquido;
 
         // --- Data e hora de emissão da NFS-e ---

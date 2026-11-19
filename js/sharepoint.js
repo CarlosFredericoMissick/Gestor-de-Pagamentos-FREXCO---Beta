@@ -58,7 +58,32 @@ async function loadPrestadoresFromSharePoint() {
 
 async function savePrestadoresSP() { await savePrestadoresSP_internal(); }
 
-async function savePrestadoresSP_internal(skipMerge = false) {
+// Gravações de prestadores.json em fila: duas gravações simultâneas (ex.: duplo clique em
+// Salvar enquanto a primeira ainda roda) faziam dois PUTs concorrentes no mesmo arquivo; a
+// primeira gravava e a outra podia voltar com erro (409/423), gerando o aviso de falha com a
+// alteração já salva. Na fila, cada gravação faz merge + PUT depois que a anterior terminar.
+let _filaGravacaoPrestadores = Promise.resolve();
+
+function savePrestadoresSP_internal(skipMerge = false) {
+    const gravacao = _filaGravacaoPrestadores.then(() => gravarPrestadoresSP(skipMerge));
+    _filaGravacaoPrestadores = gravacao.catch(() => {});
+    return gravacao;
+}
+
+// Depois de um PUT com erro (HTTP 5xx/timeout ou resposta ilegível), confere se o arquivo no
+// SharePoint é o que acabamos de enviar: o servidor pode ter gravado mesmo assim.
+async function prestadoresGravadosNoSP(idGravacao) {
+    try {
+        const resp = await graphFetch(urlApproot('prestadores.json', ':/content'));
+        if (!resp.ok) return false;
+        const data = await resp.json();
+        return data.idGravacao === idGravacao;
+    } catch (e) {
+        return false;
+    }
+}
+
+async function gravarPrestadoresSP(skipMerge) {
     if (!spAccessToken) return;
 
     // Merge: busca versão atual do SP, preserva campos que possam ter sido
@@ -90,17 +115,28 @@ async function savePrestadoresSP_internal(skipMerge = false) {
     }
 
     const toSave = prestadoresList.map(p => ({...p, contrato: p.contrato ? {...p.contrato, fileData: null} : null}));
-    const body = JSON.stringify({ prestadores: toSave, lastUpdate: new Date().toISOString(), lastModifiedBy: spAccount?.name || spAccount?.username || 'desconhecido' }, null, 2);
+    // idGravacao identifica esta gravação para a conferência após erro (campo extra, os
+    // leitores só usam `prestadores`)
+    const idGravacao = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const body = JSON.stringify({ prestadores: toSave, lastUpdate: new Date().toISOString(), lastModifiedBy: spAccount?.name || spAccount?.username || 'desconhecido', idGravacao }, null, 2);
     let erro = null;
     try {
         const resp = await graphFetch(
             urlApproot('prestadores.json', ':/content'),
             { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body }
         );
-        if (!resp.ok) erro = mensagemErroSP(resp.status);
+        if (!resp.ok) {
+            const detalhe = await resp.text?.().catch(() => '') ?? '';
+            console.error('Erro ao salvar prestadores SP:', resp.status, detalhe);
+            erro = mensagemErroSP(resp.status);
+        }
     } catch(e) {
         console.error('Erro ao salvar prestadores SP:', e);
         erro = e.message || String(e);
+    }
+    if (erro && await prestadoresGravadosNoSP(idGravacao)) {
+        console.warn(`Gravação de prestadores respondeu com erro (${erro}), mas o arquivo no SharePoint tem esta versão: considerada salva.`);
+        erro = null;
     }
     if (erro) {
         alert(`❌ Os prestadores NÃO foram salvos no SharePoint (${erro}).\n\nAs alterações ficaram só neste navegador. Tente novamente.`);
